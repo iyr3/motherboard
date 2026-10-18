@@ -75,6 +75,10 @@ def initialize_database():
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 expires_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS app_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
             """
         )
@@ -264,9 +268,19 @@ def budgets_page():
     return send_from_directory(ROOT, "budgets.html")
 
 
+@app.get("/components.html")
+def components_page():
+    return send_from_directory(ROOT, "components.html")
+
+
 @app.get("/guides.css")
 def guide_stylesheet():
     return send_from_directory(ROOT, "guides.css", mimetype="text/css")
+
+
+@app.get("/budget-planner.js")
+def budget_planner_script():
+    return send_from_directory(ROOT, "budget-planner.js", mimetype="application/javascript")
 
 
 @app.get("/api/records")
@@ -280,15 +294,33 @@ def list_records():
 def seed_records():
     payload = request.get_json(silent=True) or {}
     incoming = payload.get("records") if isinstance(payload, dict) else None
+    version = payload.get("version", 1) if isinstance(payload, dict) else 1
     if not isinstance(incoming, list) or not incoming:
         return error("بيانات التهيئة غير صحيحة.", 400)
     try:
         records = [validate_record(item) for item in incoming]
+        version = int(version)
+        if version < 1 or version > 100:
+            raise ValueError("إصدار الكتالوج غير صحيح.")
         connection = get_database()
         with transaction(connection):
-            if connection.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 0:
+            current = connection.execute(
+                "SELECT value FROM app_meta WHERE key = 'catalog_version'"
+            ).fetchone()
+            current_version = int(current["value"]) if current else 0
+            if current_version < version:
                 for record in records:
-                    save_record(connection, record)
+                    connection.execute(
+                        """INSERT OR IGNORE INTO records
+                           (id, type, name, generation, summary, details, specs_json, use_case, image, score, updated_at)
+                           VALUES (:id, :type, :name, :generation, :summary, :details, :specs_json, :use_case, :image, :score, :updated_at)""",
+                        record,
+                    )
+                connection.execute(
+                    "INSERT INTO app_meta(key, value) VALUES ('catalog_version', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (str(version),),
+                )
     except (ValueError, TypeError) as exception:
         return error(str(exception), 400)
     return jsonify({"ok": True})
